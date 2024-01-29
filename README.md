@@ -10,4 +10,5 @@ When a scan command is detected, the demo triggers a datawedge scan command.
 ## Documentation
 
 For more information about VOSK please visit the [Vosk Website](https://alphacephei.com/vosk/android).
+
 For more information about DATAWEDGE please visit the [Zebra Techdocs Website](https://techdocs.zebra.com).
