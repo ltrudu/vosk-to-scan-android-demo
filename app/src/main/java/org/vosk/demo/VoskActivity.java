@@ -23,6 +23,19 @@ import android.widget.Button;
 import android.widget.TextView;
 import android.widget.ToggleButton;
 
+import com.zebra.datawedgeprofileintents.DWProfileBaseSettings;
+import com.zebra.datawedgeprofileintents.DWProfileCommandBase;
+import com.zebra.datawedgeprofileintents.DWProfileCreate;
+import com.zebra.datawedgeprofileintents.DWProfileCreateSettings;
+import com.zebra.datawedgeprofileintents.DWProfileDelete;
+import com.zebra.datawedgeprofileintents.DWProfileDeleteSettings;
+import com.zebra.datawedgeprofileintents.DWProfileSetConfig;
+import com.zebra.datawedgeprofileintents.DWScanReceiver;
+import com.zebra.datawedgeprofileintents.DWScannerPluginDisable;
+import com.zebra.datawedgeprofileintents.DWScannerPluginEnable;
+import com.zebra.datawedgeprofileintents.DWScannerStartScan;
+import com.zebra.datawedgeprofileintents.DataWedgeConstants;
+
 import org.vosk.LibVosk;
 import org.vosk.LogLevel;
 import org.vosk.Model;
@@ -56,16 +69,23 @@ public class VoskActivity extends Activity implements
     private SpeechStreamService speechStreamService;
     private TextView resultView;
 
+    DWScanReceiver mScanReceiver;
+
+    Boolean mPartialProcessed = false;
+
     @Override
     public void onCreate(Bundle state) {
         super.onCreate(state);
         setContentView(R.layout.main);
 
+
+
+        initScanReveiver();
+
         // Setup layout
         resultView = findViewById(R.id.result_text);
         setUiState(STATE_START);
 
-        findViewById(R.id.recognize_file).setOnClickListener(view -> recognizeFile());
         findViewById(R.id.recognize_mic).setOnClickListener(view -> recognizeMicrophone());
         ((ToggleButton) findViewById(R.id.pause)).setOnCheckedChangeListener((view, isChecked) -> pause(isChecked));
 
@@ -80,8 +100,26 @@ public class VoskActivity extends Activity implements
         }
     }
 
+    private void initScanReveiver() {
+        /**
+         * Initialize the scan receiver
+         */
+        mScanReceiver = new DWScanReceiver(this,
+                DataWedgeSettingsHolder.mDemoIntentAction,
+                DataWedgeSettingsHolder.mDemoIntentCategory,
+                false,
+                new DWScanReceiver.onScannedData() {
+                    @Override
+                    public void scannedData(String source, String data, String typology) {
+                        addLineToResults("Source: " + source);
+                        addLineToResults("Typology: " + typology+ ", Data: " + data);
+                    }
+                }
+        );
+    }
+
     private void initModel() {
-        StorageService.unpack(this, "model-en-us", "model",
+        StorageService.unpack(this, "model-fr-fr", "model",
                 (model) -> {
                     this.model = model;
                     setUiState(STATE_READY);
@@ -89,6 +127,59 @@ public class VoskActivity extends Activity implements
                 (exception) -> setErrorState("Failed to unpack the model" + exception.getMessage()));
     }
 
+    @Override
+    protected void onResume() {
+        super.onResume();
+        resumeScanner();
+    }
+
+    private void resumeScanner() {
+        DWScannerPluginEnable dwpluginenable = new DWScannerPluginEnable(this);
+        DWProfileBaseSettings settings = new DWProfileBaseSettings()
+        {{
+            mProfileName = getPackageName();
+        }};
+
+        dwpluginenable.execute(settings, new DWProfileCommandBase.onProfileCommandResult() {
+            @Override
+            public void result(String profileName, String action, String command, String result, String resultInfo, String commandidentifier) {
+                addLineToResults("DWPlugin enable result:" + result);
+            }
+
+            @Override
+            public void timeout(String profileName) {
+
+            }
+        });
+
+        mScanReceiver.startReceive();
+    }
+
+    @Override
+    protected void onPause() {
+        pauseScanner();
+        super.onPause();
+    }
+
+    private void pauseScanner() {
+        mScanReceiver.stopReceive();
+        DWScannerPluginDisable dwplugindisable = new DWScannerPluginDisable(this);
+        DWProfileBaseSettings settings = new DWProfileBaseSettings()
+        {{
+            mProfileName = getPackageName();
+        }};
+
+        dwplugindisable.execute(settings, new DWProfileCommandBase.onProfileCommandResult() {
+            @Override
+            public void result(String profileName, String action, String command, String result, String resultInfo, String commandidentifier) {
+                addLineToResults("DWPlugin disable result:" + result);
+            }
+            @Override
+            public void timeout(String profileName) {
+
+            }
+        });
+    }
 
     @Override
     public void onRequestPermissionsResult(int requestCode,
@@ -123,6 +214,7 @@ public class VoskActivity extends Activity implements
     @Override
     public void onResult(String hypothesis) {
         resultView.append(hypothesis + "\n");
+        mPartialProcessed = false;
     }
 
     @Override
@@ -136,7 +228,19 @@ public class VoskActivity extends Activity implements
 
     @Override
     public void onPartialResult(String hypothesis) {
-        resultView.append(hypothesis + "\n");
+        if(mPartialProcessed == false) {
+            if (hypothesis.equals("{\n  \"partial\" : \"stop microphone\"\n}")) {
+                stopMicrophone();
+                resultView.append(hypothesis + "\n");
+                mPartialProcessed = true;
+            } else if (hypothesis.equals("{\n  \"partial\" : \"scam\"\n}")
+                    || hypothesis.equals("{\n  \"partial\" : \"scan\"\n}")
+                    || hypothesis.equals("{\n  \"partial\" : \"scans\"\n}")) {
+                startScan();
+                resultView.append(hypothesis + "\n");
+                mPartialProcessed = true;
+            }
+        }
     }
 
     @Override
@@ -154,36 +258,29 @@ public class VoskActivity extends Activity implements
             case STATE_START:
                 resultView.setText(R.string.preparing);
                 resultView.setMovementMethod(new ScrollingMovementMethod());
-                findViewById(R.id.recognize_file).setEnabled(false);
                 findViewById(R.id.recognize_mic).setEnabled(false);
                 findViewById(R.id.pause).setEnabled((false));
                 break;
             case STATE_READY:
                 resultView.setText(R.string.ready);
                 ((Button) findViewById(R.id.recognize_mic)).setText(R.string.recognize_microphone);
-                findViewById(R.id.recognize_file).setEnabled(true);
                 findViewById(R.id.recognize_mic).setEnabled(true);
                 findViewById(R.id.pause).setEnabled((false));
                 break;
             case STATE_DONE:
-                ((Button) findViewById(R.id.recognize_file)).setText(R.string.recognize_file);
                 ((Button) findViewById(R.id.recognize_mic)).setText(R.string.recognize_microphone);
-                findViewById(R.id.recognize_file).setEnabled(true);
                 findViewById(R.id.recognize_mic).setEnabled(true);
                 findViewById(R.id.pause).setEnabled((false));
                 ((ToggleButton) findViewById(R.id.pause)).setChecked(false);
                 break;
             case STATE_FILE:
-                ((Button) findViewById(R.id.recognize_file)).setText(R.string.stop_file);
                 resultView.setText(getString(R.string.starting));
                 findViewById(R.id.recognize_mic).setEnabled(false);
-                findViewById(R.id.recognize_file).setEnabled(true);
                 findViewById(R.id.pause).setEnabled((false));
                 break;
             case STATE_MIC:
                 ((Button) findViewById(R.id.recognize_mic)).setText(R.string.stop_microphone);
                 resultView.setText(getString(R.string.say_something));
-                findViewById(R.id.recognize_file).setEnabled(false);
                 findViewById(R.id.recognize_mic).setEnabled(true);
                 findViewById(R.id.pause).setEnabled((true));
                 break;
@@ -195,38 +292,12 @@ public class VoskActivity extends Activity implements
     private void setErrorState(String message) {
         resultView.setText(message);
         ((Button) findViewById(R.id.recognize_mic)).setText(R.string.recognize_microphone);
-        findViewById(R.id.recognize_file).setEnabled(false);
         findViewById(R.id.recognize_mic).setEnabled(false);
-    }
-
-    private void recognizeFile() {
-        if (speechStreamService != null) {
-            setUiState(STATE_DONE);
-            speechStreamService.stop();
-            speechStreamService = null;
-        } else {
-            setUiState(STATE_FILE);
-            try {
-                Recognizer rec = new Recognizer(model, 16000.f, "[\"one zero zero zero one\", " +
-                        "\"oh zero one two three four five six seven eight nine\", \"[unk]\"]");
-
-                InputStream ais = getAssets().open(
-                        "10001-90210-01803.wav");
-                if (ais.skip(44) != 44) throw new IOException("File too short");
-
-                speechStreamService = new SpeechStreamService(rec, ais, 16000);
-                speechStreamService.start(this);
-            } catch (IOException e) {
-                setErrorState(e.getMessage());
-            }
-        }
     }
 
     private void recognizeMicrophone() {
         if (speechService != null) {
-            setUiState(STATE_DONE);
-            speechService.stop();
-            speechService = null;
+            stopMicrophone();
         } else {
             setUiState(STATE_MIC);
             try {
@@ -239,6 +310,13 @@ public class VoskActivity extends Activity implements
         }
     }
 
+    private void stopMicrophone()
+    {
+        setUiState(STATE_DONE);
+        speechService.stop();
+        speechService = null;
+    }
+
 
     private void pause(boolean checked) {
         if (speechService != null) {
@@ -246,4 +324,42 @@ public class VoskActivity extends Activity implements
         }
     }
 
+
+    private void startScan()
+    {
+        addLineToResults("Start Software Scan");
+        DWScannerStartScan dwstartscan = new DWScannerStartScan(VoskActivity.this);
+        DWProfileBaseSettings settings = new DWProfileBaseSettings()
+        {{
+            mProfileName = DataWedgeSettingsHolder.mDemoProfileName;
+        }};
+
+        dwstartscan.execute(settings, new DWProfileCommandBase.onProfileCommandResult() {
+            @Override
+            public void result(String profileName, String action, String command, String result, String resultInfo, String commandidentifier) {
+                if(result.equalsIgnoreCase(DataWedgeConstants.COMMAND_RESULT_SUCCESS))
+                {
+                    addLineToResults("Start Scan on profile: " + profileName + " succeeded");
+                }
+                else
+                {
+                    addLineToResults("Error Starting Scanner on profile: " + profileName + "\n" + resultInfo);
+                }
+            }
+
+            @Override
+            public void timeout(String profileName) {
+                addLineToResults("Timeout while trying to start Scanner on profile: " + profileName);
+            }
+        });
+    }
+    private void addLineToResults(String line)
+    {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                resultView.append(line + "\n");
+            }
+        });
+    }
 }
